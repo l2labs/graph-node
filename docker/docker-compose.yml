@@ -19,7 +19,7 @@ services:
       postgres_pass: let-me-in
       postgres_db: graph-node
       ipfs: 'ipfs:5001'
-      ethereum: 'zulutestnet:http://18.179.38.44:3050'
+      ethereum: 'zulutestnet:https://rpc-testnet.zulunetwork.io'
       GRAPH_LOG: info
   ipfs:
     image: ipfs/kubo:v0.17.0

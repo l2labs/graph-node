@@ -1,4 +1,6 @@
 use graph::blockchain::{Block, BlockTime};
+use graph::data::query::Trace;
+use graph::data::store::scalar::Timestamp;
 use graph::data::subgraph::schema::DeploymentCreate;
 use graph::data::subgraph::LATEST_VERSION;
 use graph::entity;
@@ -261,6 +263,7 @@ fn test_schema(id: DeploymentHash, id_type: IdType) -> InputSchema {
         bands: [Band!]!
         writtenSongs: [Song!]! @derivedFrom(field: \"writtenBy\")
         favoriteCount: Int8!
+        birthDate: Timestamp!
     }
 
     type Band @entity {
@@ -459,12 +462,14 @@ async fn insert_test_entities(
     let is = &manifest.schema;
     let pub1 = &*PUB1;
     let ts0 = BlockTime::for_test(&BLOCKS[0]);
+    let timestamp =
+        Timestamp::from_microseconds_since_epoch(1710837304040956).expect("valid timestamp");
     let entities0 = vec![
         (
             "Musician",
             vec![
-                entity! { is => id: "m1", name: "John", mainBand: "b1", bands: vec!["b1", "b2"], favoriteCount: 10 },
-                entity! { is => id: "m2", name: "Lisa", mainBand: "b1", bands: vec!["b1"], favoriteCount: 100 },
+                entity! { is => id: "m1", name: "John", mainBand: "b1", bands: vec!["b1", "b2"], favoriteCount: 10, birthDate: timestamp.clone() },
+                entity! { is => id: "m2", name: "Lisa", mainBand: "b1", bands: vec!["b1"], favoriteCount: 100, birthDate: timestamp.clone() },
             ],
         ),
         ("Publisher", vec![entity! { is => id: pub1 }]),
@@ -570,8 +575,8 @@ async fn insert_test_entities(
     let entities1 = vec![(
         "Musician",
         vec![
-            entity! { is => id: "m3", name: "Tom", mainBand: "b2", bands: vec!["b1", "b2"], favoriteCount: 5 },
-            entity! { is => id: "m4", name: "Valerie", bands: Vec::<String>::new(), favoriteCount: 20 },
+            entity! { is => id: "m3", name: "Tom", mainBand: "b2", bands: vec!["b1", "b2"], favoriteCount: 5, birthDate: timestamp.clone() },
+            entity! { is => id: "m4", name: "Valerie", bands: Vec::<String>::new(), favoriteCount: 20, birthDate: timestamp.clone() },
         ],
     )];
     let entities1 = insert_ops(&manifest.schema, entities1);
@@ -785,6 +790,7 @@ fn can_query_one_to_one_relationship() {
                 name
             }
             favoriteCount
+            birthDate
         }
         songStats(first: 100, orderBy: id) {
             id
@@ -801,10 +807,10 @@ fn can_query_one_to_one_relationship() {
         let s = id_type.songs();
         let exp = object! {
             musicians: vec![
-                object! { name: "John", mainBand: object! { name: "The Musicians" }, favoriteCount: "10" },
-                object! { name: "Lisa", mainBand: object! { name: "The Musicians" }, favoriteCount: "100" },
-                object! { name: "Tom",  mainBand: object! { name: "The Amateurs" }, favoriteCount: "5" },
-                object! { name: "Valerie", mainBand: r::Value::Null, favoriteCount: "20" }
+                object! { name: "John", mainBand: object! { name: "The Musicians" }, favoriteCount: "10", birthDate: "1710837304040956" },
+                object! { name: "Lisa", mainBand: object! { name: "The Musicians" }, favoriteCount: "100", birthDate: "1710837304040956" },
+                object! { name: "Tom",  mainBand: object! { name: "The Amateurs" }, favoriteCount: "5", birthDate: "1710837304040956" },
+                object! { name: "Valerie", mainBand: r::Value::Null, favoriteCount: "20", birthDate: "1710837304040956" }
             ],
             songStats: vec![
                 object! {
@@ -820,7 +826,7 @@ fn can_query_one_to_one_relationship() {
             ]
         };
         let data = extract_data!(result).unwrap();
-        assert_eq!(data, exp);
+        assert_eq!(data.to_string(), exp.to_string());
     })
 }
 
@@ -2946,24 +2952,63 @@ fn can_query_with_or_implicit_and_filter() {
 
 #[test]
 fn trace_works() {
-    run_test_sequentially(|store| async move {
-        let deployment = setup_readonly(store.as_ref()).await;
+    const QUERY1: &str = "query { musicians(first: 100) { name } }";
+
+    const QUERY2: &str = r#"
+    query {
+        m0: musicians(first: 100, block: { number: 0 }) { name }
+        m1: musicians(first: 100, block: { number: 1 }) { name }
+    }"#;
+
+    async fn run_query(deployment: &DeploymentLocator, query: &str) -> QueryResults {
         let query = Query::new(
-            graphql_parser::parse_query("query { musicians(first: 100) { name } }")
-                .unwrap()
-                .into_static(),
+            graphql_parser::parse_query(query).unwrap().into_static(),
             None,
             true,
         );
-
-        let result = execute_subgraph_query(
+        execute_subgraph_query(
             query,
-            QueryTarget::Deployment(deployment.hash, Default::default()),
+            QueryTarget::Deployment(deployment.hash.clone(), Default::default()),
         )
-        .await;
+        .await
+    }
+
+    run_test_sequentially(|store| async move {
+        let deployment = setup_readonly(store.as_ref()).await;
+
+        let result = run_query(&deployment, QUERY1).await;
 
         let trace = &result.first().unwrap().trace;
-        assert!(!trace.is_none(), "result has a trace");
+        assert!(!trace.is_none(), "first result has a trace");
+        assert!(!result.trace.is_none(), "results has a trace");
+
+        // Check that with block constraints we get a trace for each block
+        let result = run_query(&deployment, QUERY2).await;
+        use Trace::*;
+        match &result.trace {
+            None => panic!("expected Root got None"),
+            Root { blocks, .. } => {
+                assert_eq!(2, blocks.len());
+                for twc in blocks {
+                    match twc.trace.as_ref() {
+                        Block {
+                            block, children, ..
+                        } => {
+                            assert!([0, 1].contains(block));
+                            assert_eq!(1, children.len());
+                            assert_eq!(format!("m{}", block), children[0].0);
+                            match &children[0].1 {
+                                Query { .. } => {}
+                                _ => panic!("expected Query got {:?}", children[0]),
+                            }
+                        }
+                        _ => panic!("expected Block got {:?}", twc.trace),
+                    }
+                }
+            }
+            Block { .. } => panic!("expected Root got Block"),
+            Query { .. } => panic!("expected Root got Query"),
+        }
     })
 }
 

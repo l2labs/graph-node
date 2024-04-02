@@ -127,7 +127,7 @@ where
 /// Run a test with a connection into the primary database, not a full store
 pub fn run_test_with_conn<F>(test: F)
 where
-    F: FnOnce(&PgConnection),
+    F: FnOnce(&mut PgConnection),
 {
     // Lock regardless of poisoning. This also forces sequential test execution.
     let _lock = match SEQ_LOCK.lock() {
@@ -135,11 +135,11 @@ where
         Err(err) => err.into_inner(),
     };
 
-    let conn = PRIMARY_POOL
+    let mut conn = PRIMARY_POOL
         .get()
         .expect("failed to get connection for primary database");
 
-    test(&conn);
+    test(&mut conn);
 }
 
 pub fn remove_subgraphs() {
@@ -258,7 +258,7 @@ pub fn remove_subgraph(id: &DeploymentHash) {
     let name = SubgraphName::new_unchecked(id.to_string());
     SUBGRAPH_STORE.remove_subgraph(name).unwrap();
     let locs = SUBGRAPH_STORE.locators(id.as_str()).unwrap();
-    let conn = primary_connection();
+    let mut conn = primary_connection();
     for loc in locs {
         let site = conn.locate_site(loc.clone()).unwrap().unwrap();
         conn.unassign_subgraph(&site).unwrap();
@@ -405,12 +405,12 @@ pub fn insert_ens_name(hash: &str, name: &str) {
     use diesel::prelude::*;
     use graph_store_postgres::command_support::catalog::ens_names;
 
-    let conn = PRIMARY_POOL.get().unwrap();
+    let mut conn = PRIMARY_POOL.get().unwrap();
 
     insert_into(ens_names::table)
         .values((ens_names::hash.eq(hash), ens_names::name.eq(name)))
         .on_conflict_do_nothing()
-        .execute(&conn)
+        .execute(&mut conn)
         .unwrap();
 }
 
@@ -524,7 +524,7 @@ async fn execute_subgraph_query_internal(
         100,
         graphql_metrics(),
     ));
-    let mut result = QueryResults::empty();
+    let mut result = QueryResults::empty(query.root_trace(trace));
     let deployment = query.schema.id().clone();
     let store = STORE
         .clone()
@@ -532,7 +532,9 @@ async fn execute_subgraph_query_internal(
         .await
         .unwrap();
     let state = store.deployment_state().await.unwrap();
-    for (bc, (selection_set, error_policy)) in return_err!(query.block_constraint()) {
+    let by_block_constraint =
+        return_err!(StoreResolver::locate_blocks(store.as_ref(), &state, &query).await);
+    for (ptr, (selection_set, error_policy)) in by_block_constraint {
         let logger = logger.clone();
         let resolver = return_err!(
             StoreResolver::at_block(
@@ -540,7 +542,7 @@ async fn execute_subgraph_query_internal(
                 store.clone(),
                 &state,
                 SUBSCRIPTION_MANAGER.clone(),
-                bc,
+                ptr,
                 error_policy,
                 query.schema.id().clone(),
                 graphql_metrics(),
@@ -548,21 +550,20 @@ async fn execute_subgraph_query_internal(
             )
             .await
         );
-        result.append(
-            execute_query(
-                query.clone(),
-                Some(selection_set),
-                None,
-                QueryExecutionOptions {
-                    resolver,
-                    deadline,
-                    max_first: std::u32::MAX,
-                    max_skip: std::u32::MAX,
-                    trace,
-                },
-            )
-            .await,
+        let (res, status) = execute_query(
+            query.clone(),
+            Some(selection_set),
+            None,
+            QueryExecutionOptions {
+                resolver,
+                deadline,
+                max_first: std::u32::MAX,
+                max_skip: std::u32::MAX,
+                trace,
+            },
         )
+        .await;
+        result.append(res, status);
     }
     result
 }

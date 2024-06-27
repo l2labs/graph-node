@@ -3,34 +3,34 @@ services:
   graph-node:
     image: graphprotocol/graph-node
     ports:
-      - '8000:8000'
-      - '8001:8001'
-      - '8020:8020'
-      - '8030:8030'
-      - '8040:8040'
+      - '8100:8000'
+      - '8101:8001'
+      - '8120:8020'
+      - '8130:8030'
+      - '8140:8040'
     depends_on:
       - ipfs
       - postgres
     extra_hosts:
-      - host.docker.internal:host-gateway
+      - 172.19.0.1:host-gateway
     environment:
       postgres_host: postgres
       postgres_user: graph-node
       postgres_pass: let-me-in
       postgres_db: graph-node
       ipfs: 'ipfs:5001'
-      ethereum: 'mainnet:http://host.docker.internal:8545'
+      ethereum: 'zksync-era:https://mainnet.era.zksync.io'
       GRAPH_LOG: info
   ipfs:
     image: ipfs/kubo:v0.14.0
     ports:
-      - '5001:5001'
+      - '5101:5001'
     volumes:
       - ./data/ipfs:/data/ipfs
   postgres:
     image: postgres:14
     ports:
-      - '5432:5432'
+      - '5442:5432'
     command:
       [
         "postgres",
